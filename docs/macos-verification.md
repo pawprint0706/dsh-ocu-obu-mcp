@@ -64,12 +64,11 @@ Confirm before anything is written:
 - [ ] `profile patch` points at the profile DSH actually loads
 - [ ] both `probe ok` lines report the expected server names and 9 / 19 tools
 - [ ] record the `hook ok` / `hook skipped` verdict line for each of the two
-      candidates (see below — the verdict is data, not a pass/fail you can
-      predict in advance)
+      candidates
 
-The hook decision is the one thing this checklist cannot predict, because the
-installer registers a hook only if the command really runs. It prints its verdict
-per candidate:
+The hook decision is read from each CLI's own command list, not from running the
+command, so it does not depend on Chrome or on permissions being ready yet. The
+expected output is:
 
 ```
 hook ok       ocu turn-ended
@@ -77,17 +76,27 @@ hook ok       obu turn-ended
 ```
 
 On Windows the same step prints
-`hook skipped  ocu turn-ended: unknown command: turn-ended`, which is correct
-there. **Expect `ocu turn-ended` to work on macOS** — the upstream installer
-registers that hook — but the string `turn-ended` also occurs inside the MCP
-notification name `notifications/turn-ended`, so its presence in the Mach-O
-binary proves nothing. If the installer reports it as skipped on macOS, that is a
-finding: record the exact reason line and fall back to `--no-turn-ended-hooks`
-until the cursor behavior is understood.
+`hook skipped  ocu turn-ended: this build's help does not list it`, which is
+correct there. **Expect `ocu turn-ended` to be listed on macOS** — the upstream
+installer registers that hook — but note that the string `turn-ended` also occurs
+inside the MCP notification name `notifications/turn-ended`, so its presence in
+the Mach-O binary proves nothing either way.
 
-To check by hand, exactly what the hook will run:
+A `hook note` line means the hook was registered but the command did not succeed
+at that moment, which is expected before Chrome and the permissions are ready:
+
+```
+hook note     obu turn-ended is registered, but running it now reported: ...
+```
+
+If `ocu turn-ended` is reported as **skipped** on macOS, that is a finding: record
+the reason line and fall back to `--no-turn-ended-hooks` until the cursor behavior
+is understood.
+
+To check by hand:
 
 ```sh
+"$(npm root -g)/open-computer-use/dist/Open Computer Use.app/Contents/MacOS/OpenComputerUse" --help   # must list turn-ended
 "$(npm root -g)/open-computer-use/dist/Open Computer Use.app/Contents/MacOS/OpenComputerUse" turn-ended
 echo $?   # expect 0
 ```

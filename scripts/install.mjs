@@ -292,14 +292,47 @@ function shellQuote(value) {
 }
 
 /**
- * Run a hook command line exactly as the hook runner will: through the platform
+ * Read a CLI's own command list from its help output.
+ *
+ * Hook support is a *static* property of the build, so it has to be read from the
+ * advertised command list. The raw string `turn-ended` cannot be used for this:
+ * the MCP notification name `notifications/turn-ended` contains it in every build,
+ * including ones that reject the subcommand.
+ */
+function readCommandList(command) {
+  for (const args of [["--help"], ["help"]]) {
+    try {
+      const output = execFileSync(command, args, {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 10_000,
+      });
+      if (output.trim()) return output;
+    } catch (error) {
+      // Some CLIs print usage on stderr or exit non-zero; the text is still the
+      // command list, so keep it rather than discarding a usable answer.
+      const output = `${error.stdout ?? ""}${error.stderr ?? ""}`;
+      if (output.trim()) return output;
+    }
+  }
+  return "";
+}
+
+/** Whether a help listing advertises `subcommand` as a command. */
+function advertisesSubcommand(helpText, subcommand) {
+  return helpText
+    .split(/\r?\n/)
+    .some((line) => line.trim().split(/\s+/)[0] === subcommand);
+}
+
+/**
+ * Run a hook command line, exactly as the hook runner will: through the platform
  * shell, so quoting is exercised too.
  *
- * Subcommand support genuinely differs between builds — the Windows Open Computer
- * Use executable rejects `turn-ended` — and the raw string `turn-ended` cannot be
- * used to decide that, because the MCP notification name `notifications/turn-ended`
- * contains it on every platform. Testing the real command is the only reliable
- * signal, so hooks are registered only if they succeed here.
+ * This is **advisory only** and must never decide what gets registered. Whether a
+ * build has `turn-ended` is static, but whether the command *succeeds* is not:
+ * `obu turn-ended` fails whenever Chrome is not open, and registering hooks is a
+ * persistent decision that must not flip with browser state.
  */
 function runHookCommand(commandLine) {
   const options = { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 10_000 };
@@ -327,9 +360,8 @@ function runHookCommand(commandLine) {
 /**
  * Render the managed block.
  *
- * `reasoning` rows differ per platform: Open Computer Use's macOS build hides its
- * software cursor at a turn boundary and the Windows build has no `turn-ended`
- * subcommand at all, so that hook is registered on macOS only.
+ * The hook row is included only when at least one turn-boundary command was found
+ * to be supported by its build (see the capability check in main).
  */
 function renderBlock({ ocuCommand, obuCommand, hooksPath, hookCommands }) {
   const lines = [
@@ -625,29 +657,38 @@ async function main() {
     );
   }
 
-  // Turn-boundary hooks are registered only if the command actually runs on this
-  // machine, so an unsupported subcommand is skipped instead of failing at every
-  // turn end. `obu turn-ended` needs an explicit session id because the MCP server
-  // owns `obu-mcp`, not the CLI default `obu-cli`.
+  // Turn-boundary hooks. Registration is decided by each build's advertised
+  // command list, because that is a static property: the Windows Open Computer Use
+  // build has no `turn-ended` at all. A runtime attempt is reported afterwards as
+  // a note only, since it also fails for transient reasons — `obu turn-ended` needs
+  // Chrome to be open. `obu turn-ended` additionally needs an explicit session id,
+  // because the MCP server owns `obu-mcp` and not the CLI default `obu-cli`.
   const hookCommands = [];
   if (options.hooks) {
     const candidates = [
-      { label: "ocu turn-ended", command: `${shellQuote(ocuCommand)} turn-ended`, timeoutSec: 10 },
-      {
-        label: "obu turn-ended",
-        command: `${shellQuote(obuCommand)} turn-ended --session-id obu-mcp`,
-        timeoutSec: 15,
-      },
+      { label: "ocu", command: ocuCommand, args: "turn-ended", timeoutSec: 10 },
+      { label: "obu", command: obuCommand, args: "turn-ended --session-id obu-mcp", timeoutSec: 15 },
     ];
 
     for (const candidate of candidates) {
-      const result = runHookCommand(candidate.command);
-      if (!result.ok) {
-        console.log(`hook skipped  ${candidate.label}: ${result.reason}`);
+      const helpText = readCommandList(candidate.command);
+      if (!advertisesSubcommand(helpText, "turn-ended")) {
+        console.log(
+          `hook skipped  ${candidate.label} turn-ended: this build's ${helpText ? "help does not list it" : "help could not be read"}`,
+        );
         continue;
       }
-      console.log(`hook ok       ${candidate.label}`);
-      hookCommands.push({ command: candidate.command, timeoutSec: candidate.timeoutSec });
+
+      const commandLine = `${shellQuote(candidate.command)} ${candidate.args}`;
+      hookCommands.push({ command: commandLine, timeoutSec: candidate.timeoutSec });
+      console.log(`hook ok       ${candidate.label} turn-ended`);
+
+      const runtime = runHookCommand(commandLine);
+      if (!runtime.ok) {
+        console.log(
+          `hook note     ${candidate.label} turn-ended is registered, but running it now reported: ${runtime.reason}`,
+        );
+      }
     }
   } else {
     console.log("hooks         disabled (--no-turn-ended-hooks)");

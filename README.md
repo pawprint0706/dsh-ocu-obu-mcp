@@ -106,21 +106,26 @@ Stop point onto the CLIs through `@deepseek-ai/dsh-hooks-codex`, for example:
 }
 ```
 
-**A hook is registered only if the command actually runs on the machine doing the
-install.** The installer executes each candidate through the platform shell (the
-same way the hook runner will) and keeps only the ones that succeed, reporting
-every outcome:
+**Registration is decided by what the build says it supports, not by whether the
+command happens to succeed right now.** The installer reads each CLI's own command
+list (`--help`) and registers a hook only when that build advertises `turn-ended`:
 
 ```
-hook skipped  ocu turn-ended: unknown command: turn-ended
+hook skipped  ocu turn-ended: this build's help does not list it
 hook ok       obu turn-ended
+hook note     obu turn-ended is registered, but running it now reported: socket not provided ...
 ```
 
-That check is not belt-and-braces: the Windows Open Computer Use build rejects
-`turn-ended` outright, and the failure is invisible to file inspection because
-the string `turn-ended` still appears in the binary — it is part of the MCP
-notification name `notifications/turn-ended`. Only execution distinguishes the
-two, so no platform list is hardcoded anywhere.
+The distinction between those two lines is the whole point. Whether a build *has*
+`turn-ended` is static; whether running it *succeeds* is not — `obu turn-ended`
+needs Chrome to be open, so deciding by execution would let a closed browser
+silently delete a working hook from the config on the next re-run. A conditional
+capability is reported as a `hook note` instead, and the hook stays registered.
+
+Reading the command list is also the only reliable static check, because the
+string `turn-ended` appears in *every* build — including the Windows Open Computer
+Use binary that rejects the subcommand — as part of the MCP notification name
+`notifications/turn-ended`. No platform list is hardcoded anywhere.
 
 Two further details worth knowing:
 
@@ -196,10 +201,20 @@ node probe-mcp.mjs "$(npm root -g)/open-browser-use/native/darwin-arm64/open-bro
 It prints the server identity and tool catalog. If that fails, the problem is the
 package; if it succeeds, the problem is the profile or DSH.
 
-**`obu` tools work but pages don't load.** The MCP server can start with no
-browser attached. Run the `obu ping` command for your platform above; an
-unreachable extension means `obu setup` was not completed or Chrome needs a
-restart.
+**Every `obu` tool call fails with a socket error.** The message names it exactly:
+
+```
+socket not provided and active socket registry is unavailable; no connectable
+socket found by scanning: ...\open-browser-use\active.json
+```
+
+This means Chrome is not running (or the extension is not loaded), not that the
+registration is broken — the tools stay registered and start working again as soon
+as Chrome is back. This is why the `obu` row leaves `failOnStartupError` at its
+default: the MCP server starts without a browser, so a closed browser degrades the
+tools instead of rejecting profile activation. Verify with the `obu ping` command
+for your platform above; if it stays unreachable with Chrome open, `obu setup` was
+not completed.
 
 **macOS: the computer-use tools return nothing.** Grant Accessibility and Screen
 Recording (System Settings → Privacy & Security), then re-run `doctor`. A
