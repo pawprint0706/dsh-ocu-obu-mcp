@@ -1,0 +1,3 @@
+# Normalize line endings in the repository regardless of the local
+# core.autocrlf setting; checkouts still use each platform's native ending.
+* text=auto
