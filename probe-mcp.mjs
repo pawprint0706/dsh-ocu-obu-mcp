@@ -1,86 +1,47 @@
-// Probe a stdio MCP server: initialize -> tools/list, print results as JSON.
-import { spawn } from "node:child_process";
+/**
+ * Dependency-free stdio MCP smoke test.
+ *
+ * Confirms a server speaks MCP — `initialize` plus `tools/list` — and prints its
+ * identity and tool catalog. Use it after upgrading either npm package to check
+ * the server itself before suspecting the DSH profile.
+ *
+ * Usage:
+ *   node probe-mcp.mjs <command> [args...]
+ *
+ * Examples (Windows):
+ *   node probe-mcp.mjs "$env:APPDATA\npm\node_modules\open-browser-use\native\windows-amd64\open-browser-use.exe" mcp
+ *   node probe-mcp.mjs "$env:APPDATA\npm\node_modules\open-computer-use\dist\windows\amd64\open-computer-use.exe" mcp
+ *
+ * Examples (macOS, Apple Silicon):
+ *   node probe-mcp.mjs "$(npm root -g)/open-browser-use/native/darwin-arm64/open-browser-use" mcp
+ *   node probe-mcp.mjs "$(npm root -g)/open-computer-use/dist/Open Computer Use.app/Contents/MacOS/OpenComputerUse" mcp
+ */
+
+import { probeStdioMcp } from "./scripts/lib/mcp-probe.mjs";
 
 const [command, ...args] = process.argv.slice(2);
+
 if (!command) {
   console.error("usage: node probe-mcp.mjs <command> [args...]");
   process.exit(2);
 }
 
-const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
-
-let buffer = "";
-const pending = new Map();
-let stderr = "";
-
-child.stdout.setEncoding("utf8");
-child.stdout.on("data", (chunk) => {
-  buffer += chunk;
-  let index;
-  while ((index = buffer.indexOf("\n")) !== -1) {
-    const line = buffer.slice(0, index).trim();
-    buffer = buffer.slice(index + 1);
-    if (!line) continue;
-    let message;
-    try {
-      message = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (message.id !== undefined && pending.has(message.id)) {
-      const { resolve } = pending.get(message.id);
-      pending.delete(message.id);
-      resolve(message);
-    }
-  }
-});
-child.stderr.setEncoding("utf8");
-child.stderr.on("data", (chunk) => {
-  stderr += chunk;
-});
-
-function send(message) {
-  child.stdin.write(`${JSON.stringify(message)}\n`);
-}
-
-function request(id, method, params) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`timeout waiting for ${method}`)), 30000);
-    pending.set(id, {
-      resolve: (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-    });
-    send({ jsonrpc: "2.0", id, method, params });
-  });
-}
-
 try {
-  const init = await request(1, "initialize", {
-    protocolVersion: "2025-06-18",
-    capabilities: {},
-    clientInfo: { name: "dsh-probe", version: "0.0.0" },
-  });
-  send({ jsonrpc: "2.0", method: "notifications/initialized", params: {} });
-  const tools = await request(2, "tools/list", {});
-  const list = tools?.result?.tools ?? [];
+  const result = await probeStdioMcp(command, args);
   console.log(
     JSON.stringify(
       {
         ok: true,
-        server: init?.result?.serverInfo ?? null,
-        protocolVersion: init?.result?.protocolVersion ?? null,
-        toolCount: list.length,
-        tools: list.map((tool) => ({ name: tool.name, title: tool.title ?? null })),
+        server: result.serverInfo,
+        protocolVersion: result.protocolVersion,
+        toolCount: result.tools.length,
+        tools: result.tools,
       },
       null,
       2,
     ),
   );
 } catch (error) {
-  console.log(JSON.stringify({ ok: false, error: String(error), stderr }, null, 2));
+  console.log(JSON.stringify({ ok: false, error: String(error) }, null, 2));
   process.exitCode = 1;
-} finally {
-  child.kill();
 }

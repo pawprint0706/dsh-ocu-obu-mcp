@@ -1,73 +1,229 @@
-# DSH + Open Computer Use / Open Browser Use
+# dsh-ocu-obu-mcp
 
-Both upstream MCP servers are registered in the DSH `desktop` profile and were
-verified live in a running DSH session (no app restart required — the cordis
-loader watches the profile patch).
+Register [Open Computer Use](https://github.com/iFurySt/open-codex-computer-use)
+(`ocu`, desktop UI automation) and
+[Open Browser Use](https://github.com/iFurySt/open-browser-use) (`obu`, real
+Chrome automation) as stdio MCP servers in a DeepSeek Harness (DSH) profile — on
+macOS, Linux, and Windows.
 
-| Upstream | npm package | Tools in DSH | Verified |
-| --- | --- | --- | --- |
-| [open-codex-computer-use](https://github.com/iFurySt/open-codex-computer-use) | `open-computer-use@0.3.6` (CLI `ocu`) | `mcp__ocu__*` (9 tools) | `list_apps` returned the live desktop app list |
-| [open-browser-use](https://github.com/iFurySt/open-browser-use) | `open-browser-use@0.1.42` (CLI `obu`) | `mcp__obu__*` (19 tools) | `ping` -> `pong`, then `open_tab` / `wait_load` / `page_info` on example.com, tab finalized |
+DSH's generic MCP client is the only integration point used. No first-class
+computer-use provider slot is taken, so the tools show up as
+`mcp__ocu__<tool>` and `mcp__obu__<tool>` alongside whatever else the profile
+already loads.
 
-## Where the configuration lives
+> **Verification status.** Windows is verified end to end: installer, live tool
+> calls from DSH, the turn-boundary hook, and a byte-exact install/uninstall
+> round trip. On macOS the platform path mapping is validated against the real
+> package contents, but **no macOS binary has been executed** — see
+> [docs/macos-verification.md](docs/macos-verification.md) before trusting it on a
+> Mac.
 
-`~/.dsh/profiles/desktop/cordis.patch.yml` — the `# >>> ocu / obu MCP servers`
-block, appended after the existing `dsh-web-search` managed block.
+## Requirements
 
-Both rows use `@deepseek-ai/dsh-mcp-client` with `transport: stdio`, and point at
-the **absolute path of the bundled native executable** rather than the npm PATH
-shim, because:
+- Node.js 18 or newer (both npm packages require it; the installer uses it too).
+- The two packages, installed globally so their bundled native binaries exist:
 
-- a GUI/background launch does not necessarily inherit the installer's `PATH`;
-- Node cannot spawn a `.cmd` shim directly without a shell.
+  ```sh
+  npm install -g open-computer-use open-browser-use
+  ```
 
-| Server | Command | Key settings |
-| --- | --- | --- |
-| `ocu` | `%APPDATA%\npm\node_modules\open-computer-use\dist\windows\amd64\open-computer-use.exe` (`mcp`) | `toolCallTimeoutMs: 300000`, `failOnStartupError: true` |
-| `obu` | `%APPDATA%\npm\node_modules\open-browser-use\native\windows-amd64\open-browser-use.exe` (`mcp`) | `toolCallTimeoutMs: 180000`, `failOnStartupError` default (`false`) |
+- DSH already initialised at least once, so `~/.dsh/profiles/<name>/` exists.
+- macOS: macOS 14.0 or later for the Open Computer Use runtime, plus
+  Accessibility and Screen Recording permissions (granted once, below).
+- Windows/Linux: a signed-in desktop session. Neither runtime works as a
+  service or on a locked screen.
 
-A timestamped backup of the patch file from before this change sits next to it as
-`cordis.patch.yml.bak-<timestamp>`.
+## Quick start
 
-## Windows-specific decisions
-
-1. **No OCU `Stop` hook.** Upstream `scripts/install-dsh-mcp.sh` also registers a
-   turn-boundary hook running `<exe> turn-ended`, to hide OCU's software cursor.
-   The Windows build exposes no `turn-ended` subcommand — only
-   `mcp`, `doctor`, `list-apps`, `snapshot`, `call`, `help`, `version` — so the
-   hook fails on every turn end here. It was deliberately omitted instead of
-   carried over broken.
-2. **No OBU `Stop` hook.** `obu turn-ended` exists on Windows, but its CLI
-   defaults to session id `obu-cli`, which is not the session the MCP server
-   uses, so a hook would target the wrong tab group. Browser cleanup is done
-   through the `finalize_tabs` and `turn_ended` MCP tools instead.
-3. `failOnStartupError` is left at its default for OBU: the MCP server starts
-   fine without Chrome, and a missing browser must not reject profile
-   activation. OCU keeps upstream's `true`, since its bundled executable is
-   always present.
-4. Both runtimes need a **signed-in desktop session** (UI Automation for OCU,
-   the Chrome extension for OBU); neither works as a service or on a lock screen.
-
-Re-running the upstream OCU installer will refuse to edit the patch, because
-`mcp-open-computer-use` already exists outside its managed block. Delete those
-rows first if you want the installer to take over the file.
-
-## The OCU skill
-
-`skills/open-computer-use/` from the npm package was copied to
-`~/.dsh/skills/open-computer-use` (a DSH user skill root, discovery rank 400), so
-sessions get usage, installation, and troubleshooting guidance for the
-`mcp__ocu__*` tools. It appeared in the live skill catalog immediately.
-
-## probe-mcp.mjs
-
-A dependency-free stdio MCP smoke test — it speaks `initialize` + `tools/list`
-and prints the server identity and tool catalog, without needing DSH:
-
-```powershell
-node probe-mcp.mjs "$env:APPDATA\npm\node_modules\open-browser-use\native\windows-amd64\open-browser-use.exe" mcp
-node probe-mcp.mjs "$env:APPDATA\npm\node_modules\open-computer-use\dist\windows\amd64\open-computer-use.exe" mcp
+```sh
+git clone <this repo> dsh-ocu-obu-mcp
+cd dsh-ocu-obu-mcp
+node scripts/install.mjs --dry-run   # print every planned change first
+node scripts/install.mjs
 ```
 
-Use it after upgrading either package to confirm the server still speaks MCP
-before blaming the DSH profile.
+The installer:
+
+1. finds the npm global root (`npm root -g`, or `--npm-root`), and restores the
+   executable bit on the binaries if a checkout or copy lost it;
+2. **probes both servers over stdio** (`initialize` + `tools/list`) and refuses to
+   continue unless each one identifies itself as the expected server — so a bad
+   patch is never written;
+3. tests each turn-boundary hook command and registers only the ones that work
+   (below);
+4. backs up the profile patch, then writes one managed block into
+   `~/.dsh/profiles/<profile>/cordis.patch.yml`;
+5. writes the hook config (unless `--no-turn-ended-hooks`);
+6. copies the Open Computer Use skill into `~/.dsh/skills/`, which DSH scans as a
+   user skill root.
+
+It is idempotent: re-running after an `npm update -g` rewrites just that block
+and touches nothing else. `--dry-run` prints the exact block and hook config it
+would write, and writes nothing — though like a real run it still probes the
+servers and hook commands, since their results decide what would be written.
+
+Then confirm in DSH: ask for something that needs `mcp__obu__ping`, or call
+`mcp__ocu__list_apps`. DSH reloads the profile when the patch changes; profiles
+other than the running one may need a restart.
+
+## What gets written
+
+`serverName` is `ocu` / `obu`, matching the upstream convention, and each row
+spawns the **bundled native executable by absolute path** rather than the npm
+PATH shim — a GUI or background DSH launch need not inherit the installer's
+`PATH`, and Node cannot spawn a `.cmd` shim without a shell.
+
+| | macOS | Linux | Windows |
+| --- | --- | --- | --- |
+| ocu executable | `dist/Open Computer Use.app/Contents/MacOS/OpenComputerUse` | `dist/linux/<arch>/open-computer-use` | `dist/windows/<arch>/open-computer-use.exe` |
+| obu executable | `native/darwin-<arch>/open-browser-use` | `native/linux-<arch>/open-browser-use` | `native/windows-<arch>/open-browser-use.exe` |
+| `<arch>` | `arm64` on Apple Silicon, `amd64` on Intel | `amd64` / `arm64` | `amd64` / `arm64` |
+
+`ocu` keeps `failOnStartupError: true` (its bundled executable is always
+present), while `obu` leaves the default `false`: the obu MCP server starts
+without Chrome, and a missing browser must not reject profile activation.
+
+Whether a turn-boundary hook is registered is **not** decided by platform — see
+below.
+
+## Turn-boundary hooks
+
+`dsh-mcp-client` never sends MCP's `notifications/turn-ended`, which is how both
+runtimes normally clear their software cursor. The installer therefore maps DSH's
+Stop point onto the CLIs through `@deepseek-ai/dsh-hooks-codex`, for example:
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      { "hooks": [
+        { "type": "command",
+          "command": "\"<obu-path>\" turn-ended --session-id obu-mcp",
+          "timeout": 15 }
+      ] }
+    ]
+  }
+}
+```
+
+**A hook is registered only if the command actually runs on the machine doing the
+install.** The installer executes each candidate through the platform shell (the
+same way the hook runner will) and keeps only the ones that succeed, reporting
+every outcome:
+
+```
+hook skipped  ocu turn-ended: unknown command: turn-ended
+hook ok       obu turn-ended
+```
+
+That check is not belt-and-braces: the Windows Open Computer Use build rejects
+`turn-ended` outright, and the failure is invisible to file inspection because
+the string `turn-ended` still appears in the binary — it is part of the MCP
+notification name `notifications/turn-ended`. Only execution distinguishes the
+two, so no platform list is hardcoded anywhere.
+
+Two further details worth knowing:
+
+- **The session id matters.** The obu MCP server owns the browser session
+  `obu-mcp`; the CLI's own default is `obu-cli`. Passing the wrong one targets an
+  empty tab group. Verified on Windows by opening a tab through MCP and listing
+  both sessions — only `obu-mcp` saw it.
+- **`turn-ended` is non-destructive.** Verified: it exits 0 and leaves session
+  tabs open. Closing tabs remains an explicit `finalize_tabs` / `turn_ended` MCP
+  call, so the hook cannot lose a tab the user still wants.
+
+Use `--no-turn-ended-hooks` to skip the whole step.
+
+## Platform setup after installing
+
+**macOS**
+
+```sh
+"$(npm root -g)"/open-computer-use/dist/Open\ Computer\ Use.app/Contents/MacOS/OpenComputerUse doctor
+"$(npm root -g)"/open-browser-use/native/darwin-arm64/open-browser-use setup
+"$(npm root -g)"/open-browser-use/native/darwin-arm64/open-browser-use ping
+```
+
+`doctor` reports the Accessibility and Screen Recording state; grant both to
+Open Computer Use once in System Settings → Privacy & Security.
+`obu setup` registers the Chrome native messaging host and opens the extension
+page — install the extension, restart Chrome if asked, then `ping` should report
+the extension version.
+
+**Windows**
+
+```powershell
+& "$env:APPDATA\npm\node_modules\open-computer-use\dist\windows\amd64\open-computer-use.exe" doctor
+& "$env:APPDATA\npm\node_modules\open-browser-use\native\windows-amd64\open-browser-use.exe" setup
+& "$env:APPDATA\npm\node_modules\open-browser-use\native\windows-amd64\open-browser-use.exe" ping
+```
+
+**Linux** — needs a signed-in desktop session with AT-SPI2 / D-Bus for the
+computer-use runtime; run `obu setup` the same way for the browser side.
+
+## Options
+
+| Option | Effect |
+| --- | --- |
+| `--profile <name>` | Patch this DSH profile. Default: `$DSH_PROFILE`, else the only profile present, else `desktop`, else `web`. |
+| `--dsh-home <dir>` | Harness home. Default `$DSH_HOME` or `~/.dsh`. |
+| `--npm-root <dir>` | npm global root, when `npm root -g` is unavailable or wrong. |
+| `--ocu-command <path>` | Use a different Open Computer Use executable (for example a Homebrew or `.app` install). |
+| `--obu-command <path>` | Same for Open Browser Use. |
+| `--no-skill` | Do not copy the Open Computer Use skill. |
+| `--force-skill` | Replace a local skill copy that differs from the package's. |
+| `--no-turn-ended-hooks` | Register no turn-boundary hooks. |
+| `--dry-run` | Print every planned change, write nothing. |
+| `--uninstall` | Remove the managed block and hook config (the skill is left in place). |
+
+`--uninstall` returns the patch to its exact pre-install content, which is
+covered by a round-trip test.
+
+## Troubleshooting
+
+**The tools don't appear in DSH.** Check the block is in the patch DSH is
+actually loading (`--dry-run` prints the resolved path), then look for an
+activation error in the DSH log. A duplicate `serverName` is rejected by
+`dsh-mcp-client`, which is why the installer refuses to add a second `ocu` or
+`obu` row.
+
+**A server stopped working after an upgrade.** Test it outside DSH:
+
+```sh
+node probe-mcp.mjs "$(npm root -g)/open-browser-use/native/darwin-arm64/open-browser-use" mcp
+```
+
+It prints the server identity and tool catalog. If that fails, the problem is the
+package; if it succeeds, the problem is the profile or DSH.
+
+**`obu` tools work but pages don't load.** The MCP server can start with no
+browser attached. Run the `obu ping` command for your platform above; an
+unreachable extension means `obu setup` was not completed or Chrome needs a
+restart.
+
+**macOS: the computer-use tools return nothing.** Grant Accessibility and Screen
+Recording (System Settings → Privacy & Security), then re-run `doctor`. A
+terminal-launched DSH and a GUI-launched DSH can hold different permission
+grants, so grant to whichever process actually spawns the server.
+
+## Repository layout
+
+| Path | Purpose |
+| --- | --- |
+| `scripts/install.mjs` | Cross-platform installer; the single source of truth for the wiring. |
+| `scripts/check-platforms.mjs` | Validates every platform's path mapping against the real package contents. |
+| `scripts/lib/mcp-probe.mjs` | Dependency-free stdio MCP probe (initialize + tools/list). |
+| `probe-mcp.mjs` | Thin CLI over the probe, for manual smoke tests. |
+| `docs/macos-verification.md` | Checklist for first-run verification on a real Mac. |
+
+## Relationship to the upstream installers
+
+Open Computer Use ships `scripts/install-dsh-mcp.sh`, which handles macOS and
+Linux. That script writes its own managed block and registers the invalid
+Windows hook, and it cannot express the obu session-id fix. This installer
+replaces it: same DSH MCP client, but platform-correct commands and hooks, and a
+single block you can re-run safely.
+
+If you run the upstream installer anyway, it will refuse to edit a patch that
+already contains `mcp-open-computer-use` outside its own block. Run
+`node scripts/install.mjs --uninstall` first if you want to hand the file back.
