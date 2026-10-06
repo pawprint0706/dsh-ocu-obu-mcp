@@ -265,9 +265,26 @@ function yamlString(value) {
   return `'${String(value).replaceAll("'", "''")}'`;
 }
 
-/** Quote a path for the shell line a command hook runs. */
+/**
+ * Quote an executable path for the shell line a command hook runs.
+ *
+ * The escaping is deliberately platform-specific. POSIX sh interprets
+ * backslashes, `$`, and backticks inside double quotes, so they must be escaped
+ * there. `cmd.exe` and PowerShell treat backslashes literally, and escaping them
+ * would emit paths like `C:\\Users\\...` — which Windows happens to tolerate, so
+ * the mistake stays invisible until something stricter consumes the path. The
+ * value is JSON-encoded separately when written to the hook config, so no JSON
+ * escaping belongs here either.
+ */
 function shellQuote(value) {
-  return `"${String(value)
+  const text = String(value);
+  if (process.platform === "win32") {
+    if (text.includes('"')) {
+      fail(`cannot build a hook command for a path containing a double quote: ${text}`);
+    }
+    return `"${text}"`;
+  }
+  return `"${text
     .replaceAll("\\", "\\\\")
     .replaceAll('"', '\\"')
     .replaceAll("$", "\\$")
