@@ -181,8 +181,26 @@ computer-use runtime; run `obu setup` the same way for the browser side.
 | `--dry-run` | Print every planned change, write nothing. |
 | `--uninstall` | Remove the managed block and hook config (the skill is left in place). |
 
-`--uninstall` returns the patch to its exact pre-install content, which is
-covered by a round-trip test.
+`--uninstall` returns the patch to its exact pre-install content — including a new
+profile's `[]` placeholder — and both directions are covered by
+`scripts/check-patch-edit.mjs`, which runs in a second with no dependencies.
+
+### Editing the profile patch safely
+
+A brand-new DSH profile's `cordis.patch.yml` is a bare `[]`, an empty *flow*
+sequence. Appending a block sequence after it leaves two top-level YAML nodes and
+the file stops parsing, which takes the whole profile down — so the installer
+replaces that placeholder rather than adding after it, and repairs a file already
+left in that shape. `scripts/check-patch-edit.mjs` asserts this along with
+byte-exact uninstall, idempotency, and preservation of mixed line endings:
+
+```sh
+node scripts/check-patch-edit.mjs
+```
+
+Worth running after touching anything in `replaceBlock` / `stripBlock`. Both
+defects found in this code were silent: the installer printed success while
+producing a patch DSH could not load, or while dropping a working hook.
 
 ## Troubleshooting
 
@@ -226,6 +244,7 @@ grants, so grant to whichever process actually spawns the server.
 | Path | Purpose |
 | --- | --- |
 | `scripts/install.mjs` | Cross-platform installer; the single source of truth for the wiring. |
+| `scripts/check-patch-edit.mjs` | Regression checks for the profile-patch editing (no dependencies). |
 | `scripts/check-platforms.mjs` | Validates every platform's path mapping against the real package contents. |
 | `scripts/lib/mcp-probe.mjs` | Dependency-free stdio MCP probe (initialize + tools/list). |
 | `probe-mcp.mjs` | Thin CLI over the probe, for manual smoke tests. |

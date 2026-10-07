@@ -125,6 +125,7 @@ if (missing > 0) {
 } else {
   console.log(
     "\nall platform path mappings resolve against the installed packages" +
-      "\n(hook support cannot be decided from these files; install.mjs tests it)",
+      "\n(hook support cannot be decided from these files; install.mjs reads each" +
+      "\n build's own --help command list instead)",
   );
 }

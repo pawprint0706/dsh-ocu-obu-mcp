@@ -451,30 +451,62 @@ function locateBlock(text) {
   return { lines, begin, end };
 }
 
-/** Replace the managed block in place, or append it when the patch has none. */
-function replaceBlock(existingText, blockLines) {
+/** Lines that carry content: not blank, not a comment, and not the `[]` placeholder. */
+function contentLines(text) {
+  return splitLinesWithEndings(text)
+    .map((line) => lineText(line).trim())
+    .filter((line) => line.length > 0 && !line.startsWith("#") && line !== "[]");
+}
+
+/**
+ * Replace the managed block in place, or add it when the patch has none.
+ *
+ * A brand-new profile's patch is the template's bare `[]` (an empty *flow*
+ * sequence). Appending a block sequence after it would leave two top-level YAML
+ * nodes and the file would not parse at all, so the placeholder is dropped
+ * whenever the block is the only real content. Dropping it here also repairs a
+ * file already left in that broken shape by an earlier run.
+ */
+export function replaceBlock(existingText, blockLines) {
   const { lines, begin, end } = locateBlock(existingText);
   const eol = begin !== -1 ? lineEol(lines[begin]) || dominantEol(existingText) : dominantEol(existingText);
   const block = blockLines.map((line) => `${line}${eol}`).join("");
 
-  if (begin === -1) {
-    let base = existingText;
-    if (base.length > 0 && !base.endsWith("\n")) base += eol;
-    if (base.length > 0) base += eol; // exactly one blank separator line
-    return base + block;
+  // Everything the managed block does not own. The block's own lines must not
+  // count as "other content", or a file already left in the broken shape (the
+  // `[]` placeholder plus a block sequence) could never be repaired.
+  const outside = begin === -1 ? lines : [...lines.slice(0, begin), ...lines.slice(end + 1)];
+  const placeholderOnly = contentLines(outside.join("")).length === 0;
+  const clean = (list) => (placeholderOnly ? list.filter((line) => lineText(line).trim() !== "[]") : list);
+
+  if (begin !== -1) {
+    // Splice in place: text outside the block keeps its exact bytes and endings.
+    return clean(lines.slice(0, begin)).join("") + block + clean(lines.slice(end + 1)).join("");
   }
 
-  return lines.slice(0, begin).join("") + block + lines.slice(end + 1).join("");
+  let base = clean(lines).join("");
+  if (base.length > 0 && !base.endsWith("\n")) base += eol;
+  if (base.length > 0) base += eol; // exactly one blank separator line
+  return base + block;
 }
 
 /** Remove the managed block, restoring the file to its exact previous bytes. */
-function stripBlock(existingText) {
+export function stripBlock(existingText) {
   const { lines, begin, end } = locateBlock(existingText);
   if (begin === -1) return { text: existingText, changed: false };
 
-  // Undo the single blank separator line the append path added.
+  // Undo the single blank separator line the add path inserted.
   const before = begin > 0 && lineText(lines[begin - 1]) === "" ? begin - 1 : begin;
-  return { text: lines.slice(0, before).join("") + lines.slice(end + 1).join(""), changed: true };
+  const head = lines.slice(0, before);
+  const remaining = head.join("") + lines.slice(end + 1).join("");
+
+  if (contentLines(remaining).length > 0) return { text: remaining, changed: true };
+  if (remaining.length === 0) return { text: "", changed: true };
+
+  // Nothing but comments is left, so put back the `[]` the profile template wrote
+  // and a fresh profile is restored byte for byte.
+  const eol = (head.length > 0 && lineEol(head[head.length - 1])) || dominantEol(existingText);
+  return { text: `${remaining}[]${eol}`, changed: true };
 }
 
 /**
